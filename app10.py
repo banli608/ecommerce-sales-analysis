@@ -2449,14 +2449,28 @@ class Task3Forecaster:
             features.append(day_features)
 
         return pd.DataFrame(features)
-
+'''
     def hybrid_forecast(self):
         """使用源代码的ARIMA-XGBoost混合预测逻辑 - 修复数据类型"""
-        try:
+        '''try:
             from statsmodels.tsa.arima.model import ARIMA
             from xgboost import XGBRegressor
-            from sklearn.metrics import mean_absolute_percentage_error
+            from sklearn.metrics import mean_absolute_percentage_error'''
+            try:
+                from statsmodels.tsa.arima.model import ARIMA
+                STATSMODELS_NEW = True
+            except ImportError:
+                # 使用旧版本 API
+                from statsmodels.tsa.arima_model import ARIMA as ARIMA_OLD
+                STATSMODELS_NEW = False
 
+            # XGBoost 可能也需要调整
+            try:
+                from xgboost import XGBRegressor
+            except ImportError:
+                # 尝试旧版本导入
+                import xgboost as xgb
+                XGBRegressor = xgb.XGBRegressor
             # 获取数据
             train = self.results['train_data']
             test = self.results['test_data']
@@ -2565,7 +2579,90 @@ class Task3Forecaster:
             st.error(f"混合预测错误: {str(e)}")
             import traceback
             st.error(f"详细错误: {traceback.format_exc()}")
-            return False
+            return False'''
+
+
+def hybrid_forecast(self):
+    """兼容版本的 ARIMA-XGBoost 混合预测"""
+    try:
+        # 获取数据
+        train = self.results['train_data']
+        test = self.results['test_data']
+        y_train = self.results['y_train']
+        y_test = self.results['y_test']
+        date_col = self.results['date_col']
+
+        # 1. ARIMA 建模
+        st.info("Step 1: ARIMA建模...")
+        try:
+            if STATSMODELS_NEW:
+                # 新版本 API
+                arima_model = ARIMA(y_train, order=(2, 1, 2))
+            else:
+                # 旧版本 API
+                arima_model = ARIMA_OLD(y_train, order=(2, 1, 2))
+
+            arima_fit = arima_model.fit()
+            arima_train_pred = arima_fit.predict(start=0, end=len(y_train) - 1)
+            arima_test_pred = arima_fit.forecast(steps=len(y_test))
+            st.success(f"ARIMA模型训练成功")
+        except Exception as e:
+            st.warning(f"ARIMA模型训练失败，使用简单替代: {e}")
+            # 使用移动平均替代
+            arima_train_pred = np.convolve(y_train, np.ones(3) / 3, mode='same')
+            arima_test_pred = np.full_like(y_test, y_train[-3:].mean())
+
+        # 2. XGBoost 学习残差
+        st.info("Step 2: XGBoost学习残差...")
+        residuals_train = y_train - arima_train_pred
+
+        # 准备特征
+        X_train = self.create_features(train[date_col].values)
+        X_train = X_train.fillna(0).astype(float)
+
+        # XGBoost 训练
+        xgb_model = XGBRegressor(
+            max_depth=3,
+            learning_rate=0.05,
+            n_estimators=100,
+            random_state=42
+        )
+        xgb_model.fit(X_train, residuals_train)
+
+        # 测试集特征
+        X_test = self.create_features(test[date_col].values)
+        X_test = X_test.fillna(0).astype(float)
+
+        # 确保特征一致
+        missing_cols = set(X_train.columns) - set(X_test.columns)
+        for col in missing_cols:
+            X_test[col] = 0
+        X_test = X_test[X_train.columns]
+
+        # 预测残差
+        xgb_residual_pred = xgb_model.predict(X_test)
+
+        # 3. 最终预测
+        final_pred = arima_test_pred + xgb_residual_pred
+
+        # 保存结果
+        self.results['arima_model'] = arima_fit if 'arima_fit' in locals() else None
+        self.results['xgb_model'] = xgb_model
+        self.results['final_pred'] = final_pred
+
+        # 计算误差
+        from sklearn.metrics import mean_absolute_percentage_error
+        mape = mean_absolute_percentage_error(y_test, final_pred) * 100
+        self.results['mape'] = mape
+
+        st.success(f"混合预测完成！测试集MAPE: {mape:.2f}%")
+        return True
+
+    except Exception as e:
+        st.error(f"混合预测错误: {str(e)}")
+        import traceback
+        st.error(f"详细错误: {traceback.format_exc()}")
+        return False
 
     def generate_visualizations(self):
         """生成可视化图表 - 保持不变"""
